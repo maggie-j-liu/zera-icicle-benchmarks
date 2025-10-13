@@ -3,6 +3,7 @@
 #include <fstream>
 #include <span>
 #include <vector>
+#include <ctimer.h>
 
 #include "scan.h"
 
@@ -51,35 +52,51 @@ void reduce_projective(void *left, void *right) {
 
 } // namespace
 
-int main() {
-    using namespace std::chrono;
+projective_t icicle_msm(const scalar_t *scalars, const affine_t *points, int size) {
+    icicle_load_backend_from_env_or_default();
 
-    auto start = high_resolution_clock::now();
+    Device device_gpu = {"CUDA", 0};
+    icicle_set_device(device_gpu);
 
-    int N = 1 << 10;
-    
-    auto scalars = std::make_unique<scalar_t[]>(N);
-    auto points = std::make_unique<affine_t[]>(N);
+    auto config = default_msm_config();
+    config.batch_size = 1;
+    config.are_results_on_device = true;
+    config.are_scalars_on_device = true;
+    config.are_points_on_device = true;
+
+    std::cout << "Copying inputs to-device" << std::endl;
+    scalar_t* scalars_d;
+    affine_t* points_d;
+    projective_t* result_d;
+
+    icicle_malloc((void**)&scalars_d, sizeof(scalar_t) * size);
+    icicle_malloc((void**)&points_d, sizeof(affine_t) * size);
+    icicle_malloc((void**)&result_d, sizeof(projective_t));
+    icicle_copy(scalars_d, scalars, sizeof(scalar_t) * size);
+    icicle_copy(points_d, points, sizeof(affine_t) * size);
+
+    msm(scalars_d, points_d, size, config, result_d);
+
     projective_t result;
-    scalar_t::rand_host_many(scalars.get(), N);
-    projective_t::rand_host_many(points.get(), N);
+    icicle_copy(&result, result_d, sizeof(projective_t));
 
-    auto end = high_resolution_clock::now();
-    std::cout << "Reading data took "
-              << duration_cast<milliseconds>(end - start).count()
-              << " ms" << std::endl;
+    icicle_free(scalars_d);
+    icicle_free(points_d);
+    icicle_free(result_d);
 
+    return result;
+}
+
+projective_t zera_msm(const scalar_t *scalars, const affine_t* points, int size) {
     // Step 0: window split.
-    start = high_resolution_clock::now();
-
     std::vector<uint32_t> split_scalars[N_WINDOWS];
     std::vector<std::span<uint32_t>> split_scalars_span(N_WINDOWS);
 
     cilk_for (size_t i = 0; i < N_WINDOWS; i++) {
-        split_scalars[i].resize(N);
+        split_scalars[i].resize(size);
         split_scalars_span[i] = split_scalars[i];
     }
-    cilk_gpu_for (size_t i = 0; i < N; i++) {
+    cilk_gpu_for (size_t i = 0; i < size; i++) {
         const auto s = split<256, WINDOW_SIZE>(scalars[i]);
         for (size_t w = 0; w < N_WINDOWS; w++) 
             split_scalars_span[w][i] = s[w];
@@ -89,7 +106,7 @@ int main() {
         std::span<uint32_t> bucket_idx = split_scalars_span[w];
 
         std::vector<std::atomic<int>> bucket_size(1 << WINDOW_SIZE);
-        cilk_gpu_for (size_t i = 0; i < N; i++) {
+        cilk_gpu_for (size_t i = 0; i < size; i++) {
             // Histogram
             bucket_size[bucket_idx[i]].fetch_add(1, std::memory_order_relaxed);
         }
@@ -109,7 +126,7 @@ int main() {
         }
 
         auto reordered = std::make_unique_for_overwrite<size_t[]>(total_size);
-        cilk_gpu_for (size_t i = 0; i < N; i++) {
+        cilk_gpu_for (size_t i = 0; i < size; i++) {
             if (const uint32_t key = bucket_idx[i]; key) {
                 int idx = bucket_start[key].fetch_add(1, std::memory_order_relaxed);
                 reordered[idx] = i;
@@ -124,29 +141,70 @@ int main() {
             *v = *v + points[reordered[total_size - 1 - i]];
         }
 
-        // projective_t cilk_reducer(id_projective, reduce_projective)
-        //     sum{projective_t::zero()};
-        // cilk_gpu_for (size_t i = 0; i < (1 << WINDOW_SIZE) - 1; i++) {
-        //     if (bucket_offset[i] < total_size) {
-        //         sum = sum + reordered_scan[total_size - 1 - bucket_offset[i]];
-        //     }
-        // }
+        projective_t cilk_reducer(id_projective, reduce_projective)
+            sum{projective_t::zero()};
+        cilk_gpu_for (size_t i = 0; i < (1 << WINDOW_SIZE) - 1; i++) {
+            if (bucket_offset[i] < total_size) {
+                sum = sum + reordered_scan[total_size - 1 - bucket_offset[i]];
+            }
+        }
 
         // std::cout << "Bucket sums[" << w << "] = " << sum.to_affine() << std::endl;
-        // bucket_sums[w] = sum;
+        bucket_sums[w] = sum;
     }
 
-    // auto sum = projective_t::zero();
-    // for (size_t i = N_WINDOWS; i-- > 0;) {
-    //     for (size_t j = 0; j < WINDOW_SIZE; j++)
-    //         sum = sum + sum;
-    //     sum = sum + bucket_sums[i];
-    // }
+    auto sum = projective_t::zero();
+    for (size_t i = N_WINDOWS; i-- > 0;) {
+        for (size_t j = 0; j < WINDOW_SIZE; j++)
+            sum = sum + sum;
+        sum = sum + bucket_sums[i];
+    }
+    return sum;
+}
 
-    // end = high_resolution_clock::now();
-    // std::cout << "Total time is "
-    //           << duration_cast<milliseconds>(end - start).count()
-    //           << " ms" << std::endl;
-    // std::cout << "sum = " << sum.to_affine() << std::endl;
+void run_benchmark(int size, int trials) {
+	std::cout << "\n=== Zera msm, size=" << size << " ===" << std::endl;
+    auto scalars = std::make_unique<scalar_t[]>(size);
+    auto points = std::make_unique<affine_t[]>(size);
+    scalar_t::rand_host_many(scalars.get(), size);
+    projective_t::rand_host_many(points.get(), size);
 
+    projective_t sum;
+
+    for (int i = 0; i < 3; i++) {
+        sum = zera_msm(scalars.get(), points.get(), size);
+    }
+
+    ctimer_t t;
+    ctimer_start(&t);
+    for (int i = 0; i < trials; i++) {
+        zera_msm(scalars.get(), points.get(), size);
+    }
+    ctimer_stop(&t);
+    ctimer_measure(&t);
+
+    long ns = timespec_nsec(t.elapsed);
+    double ms = ns / 1000000.0 / trials;
+
+    std::cout << "avg time: "
+              << ms
+              << " ms" << std::endl;
+    std::cout << "zera sum = " << sum.to_affine() << std::endl;
+
+    projective_t icicle_sum = icicle_msm(scalars.get(), points.get(), size);
+    std::cout << "icicle sum = " << icicle_sum.to_affine() << std::endl;
+
+    std::cout << "Match " << (sum == icicle_sum) << std::endl;
+}
+
+
+int main() {
+    int sizes[] = {1 << 20, 1 << 23, 1 << 25}; // ~1M, 8M, 33M
+    int trials = 10;
+
+    for (auto s : sizes) {
+        run_benchmark(s, trials);
+    }
+
+    return 0;
 }
