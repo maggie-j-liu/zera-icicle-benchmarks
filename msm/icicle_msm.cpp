@@ -82,7 +82,7 @@ int main() {
 
   icicle_set_device(device_gpu);
 
-  int sizes[] = {1 << 20, 1 << 23, 1 << 25}; // ~1M, 8M, 33M
+  int sizes[] = {1 << 19, 1 << 20, 1 << 21};
   int trials = 10;
 
   for (auto s : sizes) {

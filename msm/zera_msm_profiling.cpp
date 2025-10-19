@@ -52,41 +52,6 @@ void reduce_projective(void *left, void *right) {
 
 } // namespace
 
-projective_t icicle_msm(const scalar_t *scalars, const affine_t *points, int size) {
-    icicle_load_backend_from_env_or_default();
-
-    Device device_gpu = {"CUDA", 0};
-    icicle_set_device(device_gpu);
-
-    auto config = default_msm_config();
-    config.batch_size = 1;
-    config.are_results_on_device = true;
-    config.are_scalars_on_device = true;
-    config.are_points_on_device = true;
-
-    std::cout << "Copying inputs to-device" << std::endl;
-    scalar_t* scalars_d;
-    affine_t* points_d;
-    projective_t* result_d;
-
-    icicle_malloc((void**)&scalars_d, sizeof(scalar_t) * size);
-    icicle_malloc((void**)&points_d, sizeof(affine_t) * size);
-    icicle_malloc((void**)&result_d, sizeof(projective_t));
-    icicle_copy(scalars_d, scalars, sizeof(scalar_t) * size);
-    icicle_copy(points_d, points, sizeof(affine_t) * size);
-
-    msm(scalars_d, points_d, size, config, result_d);
-
-    projective_t result;
-    icicle_copy(&result, result_d, sizeof(projective_t));
-
-    icicle_free(scalars_d);
-    icicle_free(points_d);
-    icicle_free(result_d);
-
-    return result;
-}
-
 projective_t zera_msm(const scalar_t *scalars, const affine_t* points, int size) {
     // Step 0: window split.
     std::vector<uint32_t> split_scalars[N_WINDOWS];
@@ -162,7 +127,7 @@ projective_t zera_msm(const scalar_t *scalars, const affine_t* points, int size)
     return sum;
 }
 
-void run_benchmark(int size, int trials) {
+void run_benchmark(int size) {
 	std::cout << "\n=== Zera msm, size=" << size << " ===" << std::endl;
     auto scalars = std::make_unique<scalar_t[]>(size);
     auto points = std::make_unique<affine_t[]>(size);
@@ -171,39 +136,17 @@ void run_benchmark(int size, int trials) {
 
     projective_t sum;
 
-    for (int i = 0; i < 3; i++) {
-        sum = zera_msm(scalars.get(), points.get(), size);
-    }
+    zera_msm(scalars.get(), points.get(), size);
 
-    ctimer_t t;
-    ctimer_start(&t);
-    for (int i = 0; i < trials; i++) {
-        zera_msm(scalars.get(), points.get(), size);
-    }
-    ctimer_stop(&t);
-    ctimer_measure(&t);
-
-    long ns = timespec_nsec(t.elapsed);
-    double ms = ns / 1000000.0 / trials;
-
-    std::cout << "avg time: "
-              << ms
-              << " ms" << std::endl;
     std::cout << "zera sum = " << sum.to_affine() << std::endl;
-
-    projective_t icicle_sum = icicle_msm(scalars.get(), points.get(), size);
-    std::cout << "icicle sum = " << icicle_sum.to_affine() << std::endl;
-
-    std::cout << "Match " << (sum == icicle_sum) << std::endl;
 }
 
 
 int main() {
-    int sizes[] = {1 << 19, 1 << 20, 1 << 21};
-    int trials = 10;
+    int sizes[] = {1 << 20}; // ~1M, 8M, 33M
 
     for (auto s : sizes) {
-        run_benchmark(s, trials);
+        run_benchmark(s);
     }
 
     return 0;
