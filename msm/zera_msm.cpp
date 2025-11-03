@@ -35,8 +35,7 @@ auto split(const scalar_t &scalar) -> std::array<uint32_t, (N + W - 1) / W> {
 
 namespace {
 
-constexpr size_t WINDOW_SIZE = 16;
-constexpr size_t N_WINDOWS = (253 + WINDOW_SIZE - 1) / WINDOW_SIZE;
+constexpr size_t ACTUAL_BITS = 253;
 
 void id_projective(void *v) {
     // NOLINTNEXTLINE(*-reinterpret-cast)
@@ -87,7 +86,10 @@ projective_t icicle_msm(const scalar_t *scalars, const affine_t *points, int siz
     return result;
 }
 
+template <size_t WINDOW_SIZE, size_t N_WINDOWS = (ACTUAL_BITS + WINDOW_SIZE - 1) / WINDOW_SIZE>
 projective_t zera_msm(const scalar_t *scalars, const affine_t* points, int size) {
+	constexpr size_t N = ((ACTUAL_BITS + WINDOW_SIZE - 1) / WINDOW_SIZE) * WINDOW_SIZE; // round up
+
     // Step 0: window split.
     std::vector<uint32_t> split_scalars[N_WINDOWS];
     std::vector<std::span<uint32_t>> split_scalars_span(N_WINDOWS);
@@ -97,7 +99,7 @@ projective_t zera_msm(const scalar_t *scalars, const affine_t* points, int size)
         split_scalars_span[i] = split_scalars[i];
     }
     cilk_gpu_for (size_t i = 0; i < size; i++) {
-        const auto s = split<256, WINDOW_SIZE>(scalars[i]);
+        const auto s = split<N, WINDOW_SIZE>(scalars[i]);
         for (size_t w = 0; w < N_WINDOWS; w++) 
             split_scalars_span[w][i] = s[w];
     }
@@ -162,23 +164,29 @@ projective_t zera_msm(const scalar_t *scalars, const affine_t* points, int size)
     return sum;
 }
 
+template <size_t WINDOW_SIZE>
 void run_benchmark(int size, int trials) {
 	std::cout << "\n=== Zera msm, size=" << size << " ===" << std::endl;
     auto scalars = std::make_unique<scalar_t[]>(size);
-    auto points = std::make_unique<affine_t[]>(size);
+    // auto points = std::make_unique<affine_t[]>(size);
     scalar_t::rand_host_many(scalars.get(), size);
-    projective_t::rand_host_many(points.get(), size);
+	auto proj_tmp = std::make_unique<projective_t[]>(size);
+	projective_t::rand_host_many(proj_tmp.get(), size);
+	auto points = std::make_unique<affine_t[]>(size);
+	for (int i = 0; i < size; ++i) points[i] = proj_tmp[i].to_affine();
+
+    // projective_t::rand_host_many(points.get(), size);
 
     projective_t sum;
 
-    for (int i = 0; i < 3; i++) {
-        sum = zera_msm(scalars.get(), points.get(), size);
+    for (int i = 0; i < 1; i++) {
+        sum = zera_msm<WINDOW_SIZE>(scalars.get(), points.get(), size);
     }
 
     ctimer_t t;
     ctimer_start(&t);
     for (int i = 0; i < trials; i++) {
-        zera_msm(scalars.get(), points.get(), size);
+        zera_msm<WINDOW_SIZE>(scalars.get(), points.get(), size);
     }
     ctimer_stop(&t);
     ctimer_measure(&t);
@@ -203,7 +211,9 @@ int main() {
     int trials = 10;
 
     for (auto s : sizes) {
-        run_benchmark(s, trials);
+        run_benchmark<14>(s, trials);
+        run_benchmark<16>(s, trials);
+        run_benchmark<18>(s, trials);
     }
 
     return 0;

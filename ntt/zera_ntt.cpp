@@ -108,27 +108,48 @@ auto ntt(scalar_t *input, size_t n) -> std::vector<scalar_t> {
     return output;
 }
 
-
-int main() {
-    int log_ntt_size = 18;
-    int ntt_size = 1 << log_ntt_size;
+void run_benchmark(int log_ntt_size, int trials) {
+	std::cout << "\n=== Zera ntt, log size=" << log_ntt_size << " ===" << std::endl;
+	int ntt_size = 1 << log_ntt_size;
     auto input = std::make_unique<scalar_t[]>(ntt_size);
 
-    // Initialize NTT domain with fast twiddles (CUDA backend)
+	// Initialize NTT domain with fast twiddles (CUDA backend)
     scalar_t basic_root = scalar_t::omega(log_ntt_size);
     auto ntt_init_domain_cfg = default_ntt_init_domain_config();
     ntt_init_domain(basic_root, ntt_init_domain_cfg);
 
-    ctimer_t t;
+	std::vector<scalar_t> output;
+
+	for (int i = 0; i < 3; i++) {
+		output = ntt(input.get(), ntt_size);
+	}
+
+	ctimer_t t;
     ctimer_start(&t);
-    const auto output_zera = ntt(input.get(), ntt_size);
-    ctimer_stop(&t);
+	for (int i = 0; i < trials; i++) {
+		output = ntt(input.get(), ntt_size);
+	}
+	ctimer_stop(&t);
     ctimer_measure(&t);
 
     long ns = timespec_nsec(t.elapsed);
-    double ms = ns / 1000000.0;
-    std::cout << "OUTPUT ZERA" << std::endl;
-    std::cout << "time " << ms << " ms" << std::endl;
+    double ms = ns / 1000000.0 / trials;
 
-    ntt_release_domain<scalar_t>();
+    std::cout << "avg time: "
+              << ms
+              << " ms" << std::endl;
+	
+	ntt_release_domain<scalar_t>();
+}
+
+
+int main() {
+	int log_sizes[] = {18, 20, 22};
+    int trials = 10;
+
+    for (auto s : log_sizes) {
+        run_benchmark(s, trials);
+    }
+
+	return 0;
 }

@@ -12,6 +12,10 @@
 #include "icicle/runtime.h"
 #include "icicle/msm.h"
 #include "icicle/curves/params/bls12_377.h"
+
+#include <nvtx3/nvtx3.hpp>
+
+
 using namespace bls12_377;
 
 template <size_t N, size_t W>
@@ -61,56 +65,78 @@ projective_t zera_msm(const scalar_t *scalars, const affine_t* points, int size)
         split_scalars[i].resize(size);
         split_scalars_span[i] = split_scalars[i];
     }
-    cilk_gpu_for (size_t i = 0; i < size; i++) {
-        const auto s = split<256, WINDOW_SIZE>(scalars[i]);
-        for (size_t w = 0; w < N_WINDOWS; w++) 
-            split_scalars_span[w][i] = s[w];
+    {
+        nvtx3::scoped_range r{"split_scalars"};
+        cilk_gpu_for (size_t i = 0; i < size; i++) {
+            const auto s = split<256, WINDOW_SIZE>(scalars[i]);
+            for (size_t w = 0; w < N_WINDOWS; w++) 
+                split_scalars_span[w][i] = s[w];
+        }
     }
     std::vector<projective_t> bucket_sums(N_WINDOWS);
     cilk_for (size_t w = 0; w < N_WINDOWS; w++) {
         std::span<uint32_t> bucket_idx = split_scalars_span[w];
 
         std::vector<std::atomic<int>> bucket_size(1 << WINDOW_SIZE);
-        cilk_gpu_for (size_t i = 0; i < size; i++) {
-            // Histogram
-            bucket_size[bucket_idx[i]].fetch_add(1, std::memory_order_relaxed);
+        {
+            nvtx3::scoped_range r{"bucket_histogram"};
+            cilk_gpu_for (size_t i = 0; i < size; i++) {
+                // Histogram
+                bucket_size[bucket_idx[i]].fetch_add(1, std::memory_order_relaxed);
+            }
         }
+        
 
         auto bucket_offset = std::make_unique_for_overwrite<int[]>(1 << WINDOW_SIZE);
         scanner<decltype(bucket_offset)> scan_bucket_offset(bucket_offset);
-        cilk_gpu_for (size_t i = 0; i < (1 << WINDOW_SIZE); i++) {
-            auto v = scan_bucket_offset.view(bucket_offset, i);
-            *v += i ? bucket_size[i].load(std::memory_order_relaxed) : 0;
+        {
+            nvtx3::scoped_range r{"scan bucket offset"};
+            cilk_gpu_for (size_t i = 0; i < (1 << WINDOW_SIZE); i++) {
+                auto v = scan_bucket_offset.view(bucket_offset, i);
+                *v += i ? bucket_size[i].load(std::memory_order_relaxed) : 0;
+            }
         }
 
         const size_t total_size = bucket_offset.get()[(1 << WINDOW_SIZE) - 1];
 
         std::vector<std::atomic<int>> bucket_start(1 << WINDOW_SIZE);
-        cilk_gpu_for (size_t i = 1; i < (1 << WINDOW_SIZE); i++) {
-            bucket_start[i].store(bucket_offset[i - 1], std::memory_order_relaxed);
-        }
-
-        auto reordered = std::make_unique_for_overwrite<size_t[]>(total_size);
-        cilk_gpu_for (size_t i = 0; i < size; i++) {
-            if (const uint32_t key = bucket_idx[i]; key) {
-                int idx = bucket_start[key].fetch_add(1, std::memory_order_relaxed);
-                reordered[idx] = i;
+        {
+            nvtx3::scoped_range r{"bucket start"};
+            cilk_gpu_for (size_t i = 1; i < (1 << WINDOW_SIZE); i++) {
+                bucket_start[i].store(bucket_offset[i - 1], std::memory_order_relaxed);
             }
         }
 
+        auto reordered = std::make_unique_for_overwrite<size_t[]>(total_size);
+        {
+            nvtx3::scoped_range r{"reorder"};
+            cilk_gpu_for (size_t i = 0; i < size; i++) {
+                if (const uint32_t key = bucket_idx[i]; key) {
+                    int idx = bucket_start[key].fetch_add(1, std::memory_order_relaxed);
+                    reordered[idx] = i;
+                }
+            }
+        }
+        
         auto reordered_scan = std::make_unique_for_overwrite<projective_t[]>(total_size);
         scanner<decltype(reordered_scan), id_projective, reduce_projective> scan_bucket(
             reordered_scan);
-        cilk_gpu_for (size_t i = 0; i < total_size; i++) {
-            auto v = scan_bucket.view(reordered_scan, i);
-            *v = *v + points[reordered[total_size - 1 - i]];
+        {
+            nvtx3::scoped_range r{"bucket scan accumulation"};
+            cilk_gpu_for (size_t i = 0; i < total_size; i++) {
+                auto v = scan_bucket.view(reordered_scan, i);
+                *v = *v + points[reordered[total_size - 1 - i]];
+            }
         }
 
         projective_t cilk_reducer(id_projective, reduce_projective)
             sum{projective_t::zero()};
-        cilk_gpu_for (size_t i = 0; i < (1 << WINDOW_SIZE) - 1; i++) {
-            if (bucket_offset[i] < total_size) {
-                sum = sum + reordered_scan[total_size - 1 - bucket_offset[i]];
+        {
+            nvtx3::scoped_range r{"bucket final sum"};
+            cilk_gpu_for (size_t i = 0; i < (1 << WINDOW_SIZE) - 1; i++) {
+                if (bucket_offset[i] < total_size) {
+                    sum = sum + reordered_scan[total_size - 1 - bucket_offset[i]];
+                }
             }
         }
 
@@ -128,7 +154,7 @@ projective_t zera_msm(const scalar_t *scalars, const affine_t* points, int size)
 }
 
 void run_benchmark(int size) {
-	std::cout << "\n=== Zera msm, size=" << size << " ===" << std::endl;
+    std::cout << "\n=== Zera msm, size=" << size << " ===" << std::endl;
     auto scalars = std::make_unique<scalar_t[]>(size);
     auto points = std::make_unique<affine_t[]>(size);
     scalar_t::rand_host_many(scalars.get(), size);
@@ -143,7 +169,7 @@ void run_benchmark(int size) {
 
 
 int main() {
-    int sizes[] = {1 << 20}; // ~1M, 8M, 33M
+    int sizes[] = {1 << 20};
 
     for (auto s : sizes) {
         run_benchmark(s);
