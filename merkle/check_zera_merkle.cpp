@@ -4,7 +4,7 @@
 #include <span>
 #include "cilk.h"
 #include "blake3.hpp"
-#include <ctimer.h>
+#include <cmath>
 using namespace bn254;
 
 using BlakeHash = std::array<uint8_t, BLAKE3_OUT_LEN>;
@@ -15,6 +15,14 @@ std::string bytes_to_hex(const BlakeHash& hash) {
     for (uint8_t byte : hash) {
         ss << std::setw(2) << static_cast<int>(byte);
     }
+    return ss.str();
+}
+
+std::string bytes_to_hex(const std::byte* data, size_t n) {
+    std::ostringstream ss;
+    ss << std::hex << std::setfill('0');
+    for (size_t i = 0; i < n; ++i)
+        ss << std::setw(2) << (static_cast<unsigned int>(data[i]) & 0xff);
     return ss.str();
 }
 
@@ -59,41 +67,62 @@ auto merklize(size_t n_rows, size_t n_cols, scalar_t* input)
         cur_layer = next_half(prev_layer);
     }
     sync_current_stream();
+	std::cout << "done" << std::endl;
     return hashes;
 }
 
-void run_benchmark(int num_leaves, int trials) {
-	std::cout << "\n=== Zera merkle tree, size=" << num_leaves << " ===" << std::endl;
-	int n_rows = 128;
-	int input_size = n_rows * num_leaves; 
-	auto input = std::make_unique<scalar_t[]>(input_size);
-	scalar_t::rand_host_many(input.get(), input_size);
+MerkleTree icicle_merklize(size_t n_rows, size_t n_cols, scalar_t* input) {
+	// Define hashers
+	auto hasher = Blake3::create(n_rows * sizeof(scalar_t)); // hash 1KB -> 32B
+	auto compress = Blake3::create(2 * hasher.output_size()); // hash every 64B to 32B
 
-	for (int i = 0; i < 3; i++) {
-		merklize(n_rows, num_leaves, input.get());
+	// Construct the tree using the layer hashers and leaf-size
+	std::vector<Hash> hashers = {hasher};
+
+	int compress_layers = std::log2(n_cols);
+	for (int i = 0; i < compress_layers; i++) {
+		hashers.push_back(compress);
 	}
+	
+	auto merkle_tree = MerkleTree::create(hashers, n_rows * sizeof(scalar_t));
 
-	ctimer_t t;
-	ctimer_start(&t);
-	for (int i = 0; i < trials; i++) {
-		merklize(n_rows, num_leaves, input.get());
-	}
-	ctimer_stop(&t);
-	ctimer_measure(&t);
+	// compute the tree
+	merkle_tree.build(input, n_rows * n_cols, default_merkle_tree_config());
 
-	long ns = timespec_nsec(t.elapsed);
-	double ms = ns / 1000000.0 / trials;
-
-    std::cout << "avg time: "
-              << ms
-              << " ms" << std::endl;
+	return merkle_tree;
 }
 
 int main() {
-	int sizes[] = {1 << 17, 1 << 18, 1 << 19, 1 << 20};
-    int trials = 10;
+	const uint64_t leaf_n_elements = 128;
+	int layers = 5;
 
-	for (int size : sizes) {
-		run_benchmark(size, trials);
+	size_t n_rows = leaf_n_elements;
+	size_t n_cols = 1 << (layers - 1);
+	int input_size = n_rows * n_cols;
+	auto input = std::make_unique<scalar_t[]>(input_size);
+	// for (uint32_t i = 0; i < input_size; i++) {
+	// 	input[i] = scalar_t::one(); 
+	// }
+	scalar_t::rand_host_many(input.get(), input_size);
+
+	std::vector<BlakeHash> hashes = merklize(n_rows, n_cols, input.get());
+
+	BlakeHash zera_root = hashes.back();
+
+	std::cout << "zera root hash " << bytes_to_hex(zera_root) << std::endl;
+
+	MerkleTree merkle_tree = icicle_merklize(n_rows, n_cols, input.get());
+
+	auto [commitment, size] = merkle_tree.get_merkle_root();
+	std::cout << "icicle root hash: " << bytes_to_hex(commitment, size) << "\n";
+
+	bool match = true;
+	for (int i = 0; i < BLAKE3_OUT_LEN; i++) {
+		if (zera_root[i] != static_cast<uint8_t>(commitment[i])) {
+			match = false;
+			break;
+		}
 	}
+
+	std::cout << "match " << match << std::endl; 
 }
