@@ -30,11 +30,9 @@ template <typename T> auto next_half(std::span<T> span) -> std::span<T> {
     return std::span<T>{span.data() + span.size(), span.size() / 2};
 }
 
-auto merklize(size_t n_rows, size_t n_cols, scalar_t* input)
-    -> std::vector<BlakeHash> {
+BlakeHash merklize(size_t n_rows, size_t n_cols, scalar_t* input) {
 	int input_size = n_rows * n_cols;
-
-    std::vector<BlakeHash> hashes(2 * n_cols - 1);
+	auto hashes = std::make_unique<BlakeHash[]>(2 * n_cols - 1);
 
     // Start by hashing every column
     tapir_deferred_sync cilk_gpu_for (size_t i = 0; i < n_cols; i++) {
@@ -56,7 +54,7 @@ auto merklize(size_t n_rows, size_t n_cols, scalar_t* input)
                            next_data);
     }
 
-    std::span<BlakeHash> prev_layer{hashes.data(), n_cols};
+    std::span<BlakeHash> prev_layer{hashes.get(), n_cols};
     std::span<BlakeHash> cur_layer = next_half(prev_layer);
     while (cur_layer.size() >= 1) {
         tapir_deferred_sync cilk_gpu_for (size_t i = 0; i < cur_layer.size();
@@ -68,7 +66,7 @@ auto merklize(size_t n_rows, size_t n_cols, scalar_t* input)
     }
     sync_current_stream();
 	std::cout << "done" << std::endl;
-    return hashes;
+    return hashes[2 * n_cols - 2];
 }
 
 MerkleTree icicle_merklize(size_t n_rows, size_t n_cols, scalar_t* input) {
@@ -105,9 +103,7 @@ int main() {
 	// }
 	scalar_t::rand_host_many(input.get(), input_size);
 
-	std::vector<BlakeHash> hashes = merklize(n_rows, n_cols, input.get());
-
-	BlakeHash zera_root = hashes.back();
+	BlakeHash zera_root = merklize(n_rows, n_cols, input.get());
 
 	std::cout << "zera root hash " << bytes_to_hex(zera_root) << std::endl;
 

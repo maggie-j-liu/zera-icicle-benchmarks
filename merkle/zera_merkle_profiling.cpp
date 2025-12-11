@@ -5,6 +5,7 @@
 #include "cilk.h"
 #include "blake3.hpp"
 #include <ctimer.h>
+#include <nvtx3/nvtx3.hpp>
 using namespace bn254;
 
 using BlakeHash = std::array<uint8_t, BLAKE3_OUT_LEN>;
@@ -24,11 +25,12 @@ template <typename T> auto next_half(std::span<T> span) -> std::span<T> {
 
 double merklize(size_t n_rows, size_t n_cols, scalar_t* input) {
 	ctimer_t t;
-	ctimer_start(&t);	
-
+	ctimer_start(&t);
 	int input_size = n_rows * n_cols;
+	auto hashes = std::make_unique<BlakeHash[]>(2 * n_cols - 1);
 
-    auto hashes = std::make_unique<BlakeHash[]>(2 * n_cols - 1);
+    // std::vector<BlakeHash> hashes(2 * n_cols - 1);
+	nvtx3::scoped_range r{"merklize"};
 
     // Start by hashing every column
     tapir_deferred_sync cilk_gpu_for (size_t i = 0; i < n_cols; i++) {
@@ -49,6 +51,7 @@ double merklize(size_t n_rows, size_t n_cols, scalar_t* input) {
         blake3::hash_multi(hashes[i].data(), n_rows * sizeof(scalar_t),
                            next_data);
     }
+
 	
     std::span<BlakeHash> prev_layer{hashes.get(), n_cols};
     std::span<BlakeHash> cur_layer = next_half(prev_layer);
@@ -68,23 +71,19 @@ double merklize(size_t n_rows, size_t n_cols, scalar_t* input) {
 	return ns / 1000000.0;
 }
 
-void run_benchmark(int num_leaves, int trials) {
+void run_benchmark(int num_leaves) {
 	std::cout << "\n=== Zera merkle tree, size=" << num_leaves << " ===" << std::endl;
 	int n_rows = 128;
 	int input_size = n_rows * num_leaves; 
 	auto input = std::make_unique<scalar_t[]>(input_size);
 	scalar_t::rand_host_many(input.get(), input_size);
 
-	for (int i = 0; i < 3; i++) {
-		merklize(n_rows, num_leaves, input.get());
-	}
-
 	double total_time = 0;	
-	for (int i = 0; i < trials; i++) {
-		total_time += merklize(n_rows, num_leaves, input.get());
-	}
 
-	double ms = total_time / trials;
+	merklize(n_rows, num_leaves, input.get());
+	total_time = merklize(n_rows, num_leaves, input.get());
+
+	double ms = total_time;
 
     std::cout << "avg time: "
               << ms
@@ -92,10 +91,9 @@ void run_benchmark(int num_leaves, int trials) {
 }
 
 int main() {
-	int sizes[] = {1 << 17, 1 << 18, 1 << 19, 1 << 20};
-    int trials = 10;
+	int sizes[] = {1 << 18};
 
 	for (int size : sizes) {
-		run_benchmark(size, trials);
+		run_benchmark(size);
 	}
 }

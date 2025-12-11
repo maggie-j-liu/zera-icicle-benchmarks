@@ -1,3 +1,9 @@
+extern "C" {
+void *__kitcuda_mem_host_prefetch(const void *ptr, void *stream);
+
+void __kitcuda_sync_current_stream();
+}
+
 #ifdef DEFERRED_SYNC_ENABLED
 #define sync_current_stream() __kitcuda_sync_current_stream()
 #define tapir_deferred_sync [[tapir::deferred_sync]]

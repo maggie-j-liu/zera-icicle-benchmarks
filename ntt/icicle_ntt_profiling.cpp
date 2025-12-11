@@ -8,10 +8,11 @@
 #include <span>
 #include <mutex>
 #include <ctimer.h>
+#include <nvtx3/nvtx3.hpp>
 
 using namespace bn254;
 
-void run_benchmark(int log_ntt_size, int batch_size, int trials) {
+void run_benchmark(int log_ntt_size, int batch_size) {
 	std::cout << "\n=== ICICLE ntt, log size=" << log_ntt_size << ", batch size=" << batch_size << " ===" << std::endl;
     long long ntt_size = 1 << log_ntt_size;
     auto inputs = std::make_unique<scalar_t[]>(ntt_size * batch_size);
@@ -40,13 +41,10 @@ void run_benchmark(int log_ntt_size, int batch_size, int trials) {
     icicle_malloc((void**)&outputs_d, sizeof(scalar_t) * ntt_size * batch_size);
     icicle_copy(inputs_d, inputs.get(), sizeof(scalar_t) * ntt_size * batch_size);
 
-	for (int i = 0; i < 3; i++) {
-		ntt(inputs_d, ntt_size, NTTDir::kForward, config, outputs_d);
-	}
-
     ctimer_t t;
     ctimer_start(&t);
-	for (int i = 0; i < trials; i++) {
+	{
+		nvtx3::scoped_range r{"ntt"};
     	ntt(inputs_d, ntt_size, NTTDir::kForward, config, outputs_d);
 	}
     ctimer_stop(&t);
@@ -55,7 +53,7 @@ void run_benchmark(int log_ntt_size, int batch_size, int trials) {
     icicle_copy(outputs.get(), outputs_d, sizeof(scalar_t) * ntt_size * batch_size);
 
     long ns = timespec_nsec(t.elapsed);
-  	double ms = ns / 1000000.0 / trials;
+  	double ms = ns / 1000000.0;
     std::cout << "avg time: "
               << ms
               << " ms" << std::endl;
@@ -77,13 +75,12 @@ int main() {
 
     icicle_set_device(device_gpu);
 
-	int batch_sizes[] = {1, 1 << 4, 1 << 6};
-	int log_sizes[] = {12, 14, 16};
-    int trials = 10;
+	int batch_sizes[] = {1};
+	int log_sizes[] = {16};
 
 	for (auto batch_size : batch_sizes) {
     	for (auto s : log_sizes) {
-        	run_benchmark(s, batch_size, trials);
+        	run_benchmark(s, batch_size);
     	}
 	}
 

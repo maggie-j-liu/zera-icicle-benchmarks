@@ -1,5 +1,5 @@
 
-// clang++ -O2 -o vector_add_icicle vector_add_icicle.cu -Iinclude -I/home/magpie/icicle-install/icicle/include -I/usr/local/cuda-12.9/include -L/usr/local/cuda-12.9/lib64 -lcudart -lcuda --cuda-path=/usr/local/cuda-12.9 --cuda-gpu-arch=sm_90 -L/home/magpie/icicle-install/icicle/lib -licicle_device -licicle_field_bls12_381 -licicle_curve_bls12_381 -Wl,-rpath,/home/magpie/icicle-install/icicle/lib/
+// clang++ -O2 -o vector_add_icicle vector_add_icicle.cu -Iinclude -I/home/magpie/icicle-install/icicle/include -I/usr/local/cuda-12.9/include -L/usr/local/cuda-12.9/lib64 -lcudart -lcuda --cuda-path=/usr/local/cuda-12.9 --cuda-gpu-arch=sm_80 -L/home/magpie/icicle-install/icicle/lib -licicle_device -licicle_field_bls12_381 -licicle_curve_bls12_381 -Wl,-rpath,/home/magpie/icicle-install/icicle/lib/
 #include <iostream>
 
 #include "icicle/runtime.h"
@@ -33,6 +33,11 @@ void cuda_vector_add(const scalar_t* h_a, const scalar_t* h_b, scalar_t* h_out, 
     // Kernel launch config
     int blockSize = 256;
     int gridSize = (n + blockSize - 1) / blockSize;
+
+    for (int i = 0; i < 5; i++) {
+        vector_add_kernel<<<gridSize, blockSize>>>(d_a, d_b, d_out, n);
+    }
+    cudaDeviceSynchronize();
 
     cudaProfilerStart();
 

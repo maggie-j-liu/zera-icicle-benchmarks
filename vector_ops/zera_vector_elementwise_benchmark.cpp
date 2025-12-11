@@ -39,7 +39,9 @@ void vector_mul(const scalar_t* a, const scalar_t* b, size_t size, scalar_t* out
 }
 
 void vector_div(const scalar_t* a, const scalar_t* b, size_t size, scalar_t* out) {
-  return;
+  cilk_for (size_t i = 0; i < size; i++) {
+    out[i] = a[i] * b[i].inverse();
+  }
 }
 
 void run_op(OpType op, scalar_t* a, scalar_t* b, size_t n, scalar_t* out) {

@@ -11,81 +11,35 @@
 using namespace bn254;
 
 using MlePoly = Symbol<scalar_t>;
-MlePoly user_def_cubic_sumcheck_combine(
-    const std::vector<MlePoly>& inputs)
+MlePoly identity_combine_fn(const std::vector<MlePoly>& inputs)
 {
-    size_t n_par = (inputs.size() - 1) / 7;  // (roughly, adapt as needed)
-
-    const size_t offset_coeff_par = 0;
-    const size_t offset_a_par = offset_coeff_par + n_par;
-    const size_t offset_b_par = offset_a_par + n_par;
-    const size_t offset_c_par = offset_b_par + n_par; // single c_par
-    const size_t offset_coeff_seq = offset_c_par + 1;
-    const size_t offset_a_seq = offset_coeff_seq + n_par;
-    const size_t offset_b_seq = offset_a_seq + n_par;
-    const size_t offset_c_seq = offset_b_seq + n_par;
-
-    MlePoly acc = scalar_t::zero();
-
-    // ---- first sum ----
-    for (size_t i = 0; i < n_par; i++) {
-        acc = acc + inputs[offset_coeff_par + i]
-                    * inputs[offset_a_par + i]
-                    * inputs[offset_b_par + i]
-                    * inputs[offset_c_par];
-    }
-
-    // ---- second sum ----
-    for (size_t i = 0; i < n_par; i++) {
-        acc = acc + inputs[offset_coeff_seq + i]
-                    * inputs[offset_a_seq + i]
-                    * inputs[offset_b_seq + i]
-                    * inputs[offset_c_seq + i];
-    }
-
-    return acc;
+	return inputs[0];
 }
 
 std::pair<double, double> run_benchmark_once(int log_mle_poly_size) {
+    // std::cout << "\nIcicle Examples: Sumcheck with EQ * (A * B - C) combine function" << std::endl;
 
     int mle_poly_size = 1 << log_mle_poly_size;
+	int nof_mle_poly = 1;
 
-	size_t n_par = 2;
-	int nof_mle_poly = 7 * n_par + 1;
-
-    // std::cout << "\nGenerating input data" << std::endl;
-    // generate inputs
-    std::vector<std::vector<scalar_t>> mle_polynomials(nof_mle_poly, std::vector<scalar_t>(mle_poly_size));
+	std::vector<scalar_t*> mle_polynomials(nof_mle_poly);
     for (int poly_i = 0; poly_i < nof_mle_poly; poly_i++) {
-        scalar_t::rand_host_many(mle_polynomials[poly_i].data(), mle_poly_size);
+        mle_polynomials[poly_i] = new scalar_t[mle_poly_size];
+        scalar_t::rand_host_many(mle_polynomials[poly_i], mle_poly_size);
     }
-
-	for (int i = 0; i < n_par; i++) {
-		for (int x = 1; x < mle_poly_size; x++) {
-			mle_polynomials[i][x] = mle_polynomials[i][0];
-			mle_polynomials[3 * n_par + 1 + i][x] = mle_polynomials[3 * n_par + 1 + i][0];
-		}
-	}
 
 	std::vector<scalar_t*> device_mle_polynomials(nof_mle_poly);
     for (int poly_i = 0; poly_i < nof_mle_poly; poly_i++) {
 		icicle_malloc((void **)&device_mle_polynomials[poly_i], sizeof(scalar_t) * mle_poly_size);
-        icicle_copy(device_mle_polynomials[poly_i], mle_polynomials[poly_i].data(), sizeof(scalar_t) * mle_poly_size);
+        icicle_copy(device_mle_polynomials[poly_i], mle_polynomials[poly_i], sizeof(scalar_t) * mle_poly_size);
     }
 
     // std::cout << "Calculating sum" << std::endl;
     // calculate the claimed sum
     scalar_t claimed_sum = scalar_t::zero();
-	for (int i = 0; i < n_par; i++) {
-		for (int x = 0; x < mle_poly_size; x++) {
-			claimed_sum = claimed_sum + mle_polynomials[i][0] * mle_polynomials[n_par + i][x] * mle_polynomials[2 * n_par + i][x] * mle_polynomials[3 * n_par][x];
-		}
-	}
-	for (int i = 0; i < n_par; i++) {
-		for (int x = 0; x < mle_poly_size; x++) {
-			claimed_sum = claimed_sum + mle_polynomials[3 * n_par + 1 + i][0] * mle_polynomials[4 * n_par + 1 + i][x] * mle_polynomials[5 * n_par + 1 + i][x] * mle_polynomials[6 * n_par + 1 + i][x];
-		}
-	}
+    for (int element_i = 0; element_i < mle_poly_size; element_i++) {
+        claimed_sum = claimed_sum + mle_polynomials[0][element_i];
+    }
 
     Hash hasher = Blake3::create();
     const char* domain_label = "ingonyama";
@@ -96,8 +50,7 @@ std::pair<double, double> run_benchmark_once(int log_mle_poly_size) {
 
     // create sumcheck
     auto prover_sumcheck = create_sumcheck<scalar_t>();
-
-	CombineFunction<scalar_t> combine_func(user_def_cubic_sumcheck_combine, nof_mle_poly);
+    CombineFunction<scalar_t> combine_func(identity_combine_fn, 1);
 
     // create default sumcheck config
     SumcheckConfig sumcheck_config;
@@ -140,6 +93,7 @@ std::pair<double, double> run_benchmark_once(int log_mle_poly_size) {
 	ctimer_stop(&t);
 	ctimer_measure(&t);
 
+
     ns = timespec_nsec(t.elapsed);
   	double verifier_time = ns / 1000000.0;
 
@@ -147,10 +101,6 @@ std::pair<double, double> run_benchmark_once(int log_mle_poly_size) {
 		std::cout << "ERROR: Verification mismatch" << std::endl;
 	}
     
-	for (int poly_i = 0; poly_i < nof_mle_poly; poly_i++) {
-        icicle_free(device_mle_polynomials[poly_i]);
-    }
-
 	return {prover_time, verifier_time};
 }
 
@@ -189,10 +139,11 @@ int main(int argc, char* argv[])
 
     icicle_set_device(device_gpu);
 
-	int sizes[] = {16, 18, 20};
+	int sizes[] = {18, 20, 22};
 	int trials = 10;
 
 	for (int size : sizes) {
     	run_benchmark(size, trials);
 	}
+    
 }

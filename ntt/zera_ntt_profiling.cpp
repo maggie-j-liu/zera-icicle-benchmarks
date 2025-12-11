@@ -22,6 +22,7 @@
 #include <mutex>
 #include <ctimer.h>
 #include "cilk.h"
+#include <nvtx3/nvtx3.hpp>
 
 using namespace bn254;
 
@@ -72,13 +73,20 @@ auto get_precomputed(size_t n) -> const NTTPrecomputed & {
 }
 
 
-inline void ntt(scalar_t *input, size_t n, std::span<scalar_t> output) {
+inline void ntt(scalar_t *input, size_t n, scalar_t* output) {
+	
+	auto precomputed_range = nvtx3::start_range("get_precomputed");
 	const auto &omega_br = get_precomputed(n).omega_br;
-	// for (int i = 0; i < n; i++) {
-	// 	output[i] = input[i];
+	nvtx3::end_range(precomputed_range);
+	// {
+	// 	nvtx3::scoped_range c{"copy input"};
+	// 	for (int i = 0; i < n; i++) {
+	// 		output[i] = input[i];
+	// 	}
 	// }
 	size_t log_n = clog2(n);
 	for (size_t log_m = 0, log_t = log_n - 1; log_m < log_n; log_m++, log_t--) {
+		nvtx3::scoped_range d{"iteration"};
 		const size_t t = 1 << log_t;
 		cilk_gpu_for (size_t ij = 0; ij < (n / 2); ij++) {
 			const size_t i = ij >> log_t;
@@ -90,17 +98,14 @@ inline void ntt(scalar_t *input, size_t n, std::span<scalar_t> output) {
 	}
 }
 
-auto ntt(scalar_t *input, size_t n, int batch_size) -> std::vector<scalar_t> {
-    auto output = std::vector<scalar_t>(n * batch_size);
+void ntt(scalar_t *input, scalar_t *output, size_t n, int batch_size) {
 	cilk_for (int i = 0; i < batch_size; i++) {
 		const auto row = input + n * i;
-		const auto output_span = std::span{output}.subspan(i * n, n);
-    	ntt(row, n, output_span);
+    	ntt(row, n, output + n * i);
 	}
-    return output;
 }
 
-void run_benchmark(int log_ntt_size, int batch_size, int trials) {
+void run_benchmark(int log_ntt_size, int batch_size) {
 	std::cout << "\n=== Zera ntt, log size=" << log_ntt_size << ", batch size=" << batch_size << " ===" << std::endl;
 	int ntt_size = 1 << log_ntt_size;
     auto input = std::make_unique<scalar_t[]>(ntt_size * batch_size);
@@ -111,37 +116,17 @@ void run_benchmark(int log_ntt_size, int batch_size, int trials) {
     auto ntt_init_domain_cfg = default_ntt_init_domain_config();
     ntt_init_domain(basic_root, ntt_init_domain_cfg);
 
-	std::vector<scalar_t> output;
-
-	for (int i = 0; i < 5; i++) {
-		output = ntt(input.get(), ntt_size, batch_size);
-	}
+    auto output = std::make_unique<scalar_t[]>(ntt_size * batch_size);
+	ntt(input.get(), output.get(), ntt_size, batch_size);
 
 	ctimer_t t;
     ctimer_start(&t);
-	for (int i = 0; i < trials; i++) {
-		output = ntt(input.get(), ntt_size, batch_size);
-	}
+	ntt(input.get(), output.get(), ntt_size, batch_size);
 	ctimer_stop(&t);
     ctimer_measure(&t);
 
-	// check for match with ICICLE
-	// NTTConfig<scalar_t> config = default_ntt_config<scalar_t>();
-	// ConfigExtension ntt_cfg_ext;
-    // config.ordering = Ordering::kNR;
-	// config.batch_size = batch_size;
-	// auto icicle_outputs = std::make_unique<scalar_t[]>(ntt_size * batch_size);
-	// ntt(input.get(), ntt_size, NTTDir::kForward, config, icicle_outputs.get());
-	// for (int i = 0; i < ntt_size * batch_size; i++) {
-	// 	if (output[i] != icicle_outputs[i]) {
-	// 		std::cout << "MISMATCH AT IDX " << i << std::endl;
-	// 		break;
-	// 	}
-	// }
-
-
     long ns = timespec_nsec(t.elapsed);
-    double ms = ns / 1000000.0 / trials;
+    double ms = ns / 1000000.0;
 
     std::cout << "avg time: "
               << ms
@@ -152,13 +137,12 @@ void run_benchmark(int log_ntt_size, int batch_size, int trials) {
 
 
 int main() {
-	int batch_sizes[] = {1, 1 << 4, 1 << 6};
-	int log_sizes[] = {12, 14, 16};
-    int trials = 20;
+	int batch_sizes[] = {1};
+	int log_sizes[] = {16};
 
     for (auto batch_size : batch_sizes) {
     	for (auto s : log_sizes) {
-        	run_benchmark(s, batch_size, trials);
+        	run_benchmark(s, batch_size);
     	}
 	}
 

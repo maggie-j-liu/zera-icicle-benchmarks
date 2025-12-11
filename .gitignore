@@ -1,3 +1,12 @@
-icicle_vector_add_benchmark
-zera_vector_add_benchmark
+# Ignore all
+*
+
+# Unignore all with extensions
+!*.*
+
+# Unignore all dirs
+!*/
+
 */venv/*
+*.ncu-rep
+*.nsys-rep
